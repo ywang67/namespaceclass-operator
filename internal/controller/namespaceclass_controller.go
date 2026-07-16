@@ -32,6 +32,7 @@ import (
 	namespaceclassv1alpha1 "github.com/ywang67/namespaceclass-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 )
 
 const managedResourcesAnnotation = "namespaceclass.akuity.io/managed-resources"
@@ -94,6 +95,22 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 
+		// We only support namespaced resources. A NamespaceClass provisions
+		// per-namespace resources, so a cluster-scoped resource (ClusterRole,
+		// PersistentVolume, ...) does not belong here: it would be shared across
+		// every namespace of the class and deleting it on a class switch would
+		// break the others. Skip it with a warning instead of failing.
+		mapping, err := r.RESTMapper().RESTMapping(obj.GroupVersionKind().GroupKind(), obj.GroupVersionKind().Version)
+		if err != nil {
+			log.Error(err, "failed to resolve resource scope, skipping", "kind", obj.GetKind(), "name", obj.GetName())
+			continue
+		}
+		if mapping.Scope.Name() != meta.RESTScopeNameNamespace {
+			log.Info("skipping cluster-scoped resource; NamespaceClass only supports namespaced resources",
+				"kind", obj.GetKind(), "name", obj.GetName())
+			continue
+		}
+
 		obj.SetNamespace(namespace.Name)
 		labels := obj.GetLabels()
 		if labels == nil {
@@ -107,21 +124,19 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		existing := &unstructured.Unstructured{}
 		existing.SetGroupVersionKind(obj.GroupVersionKind())
 
-		err := r.Get(ctx, client.ObjectKeyFromObject(obj), existing)
+		err = r.Get(ctx, client.ObjectKeyFromObject(obj), existing)
 		if apierrors.IsNotFound(err) {
 			if err := r.Create(ctx, obj); err != nil {
 				return ctrl.Result{}, err
 			}
-			continue
-		}
-		if err != nil {
+		} else if err != nil {
 			return ctrl.Result{}, err
-		}
-
-		// Update the existing resource with the new spec, preserving the resource version to avoid conflicts.
-		obj.SetResourceVersion(existing.GetResourceVersion())
-		if err := r.Update(ctx, obj); err != nil {
-			return ctrl.Result{}, err
+		} else {
+			// Update the existing resource, preserving the resource version to avoid conflicts.
+			obj.SetResourceVersion(existing.GetResourceVersion())
+			if err := r.Update(ctx, obj); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 
 		gvk := obj.GroupVersionKind()
