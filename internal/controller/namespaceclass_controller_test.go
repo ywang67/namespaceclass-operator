@@ -22,51 +22,73 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	namespaceclassv1alpha1 "github.com/ywang67/namespaceclass-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 var _ = Describe("NamespaceClass Controller", func() {
 	Context("When reconciling a resource", func() {
-		const (
-			resourceName      = "test-resource"
-			resourceNamespace = "default"
-		)
+		const resourceName = "test-resource"
 
 		ctx := context.Background()
 
 		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: resourceNamespace,
+			Name: resourceName,
 		}
-		namespaceclass := &namespaceclassv1alpha1.NamespaceClass{}
+		namespace := &corev1.Namespace{}
 
+		// created temp ns and nsclass instances in beforeEach
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind NamespaceClass")
-			err := k8sClient.Get(ctx, typeNamespacedName, namespaceclass)
+			err := k8sClient.Get(ctx, typeNamespacedName, namespace)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &namespaceclassv1alpha1.NamespaceClass{
+				resource := &corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: resourceNamespace,
+						Name:   resourceName,
+						Labels: map[string]string{"namespaceclass.akuity.io/name": "test-class"},
 					},
-					// TODO(user): Specify other spec details if needed.
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			}
+
+			namespaceClass := &namespaceclassv1alpha1.NamespaceClass{}
+			namespaceClassKey := types.NamespacedName{Name: "test-class"}
+
+			err = k8sClient.Get(ctx, namespaceClassKey, namespaceClass)
+			if errors.IsNotFound(err) {
+				namespaceClass = &namespaceclassv1alpha1.NamespaceClass{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-class",
+					},
+					Spec: namespaceclassv1alpha1.NamespaceClassSpec{
+						Resources: []runtime.RawExtension{
+							{
+								Raw: []byte(`{
+						"apiVersion":"v1",
+						"kind":"ServiceAccount",
+						"metadata":{"name":"application"}
+					}`),
+							},
+						},
+					},
+				}
+
+				Expect(k8sClient.Create(ctx, namespaceClass)).To(Succeed())
 			}
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &namespaceclassv1alpha1.NamespaceClass{}
+			resource := &corev1.Namespace{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance NamespaceClass")
+			By("Cleanup the specific resource instance Namespace")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
@@ -80,8 +102,21 @@ var _ = Describe("NamespaceClass Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			serviceAccount := &corev1.ServiceAccount{}
+
+			err = k8sClient.Get(
+				ctx,
+				types.NamespacedName{
+					Name:      "application",
+					Namespace: resourceName,
+				},
+				serviceAccount,
+			)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(serviceAccount.Name).To(Equal("application"))
+			Expect(serviceAccount.Namespace).To(Equal(resourceName))
 		})
 	})
 })
