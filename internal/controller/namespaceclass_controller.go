@@ -22,14 +22,26 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	namespaceclassv1alpha1 "github.com/ywang67/namespaceclass-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
+
+const managedResourcesAnnotation = "namespaceclass.akuity.io/managed-resources"
+
+type resourceRef struct {
+	Group   string `json:"group"`
+	Version string `json:"version"`
+	Kind    string `json:"kind"`
+	Name    string `json:"name"`
+}
 
 // NamespaceClassReconciler reconciles a NamespaceClass object
 type NamespaceClassReconciler struct {
@@ -40,8 +52,7 @@ type NamespaceClassReconciler struct {
 // +kubebuilder:rbac:groups=namespaceclass.akuity.io,resources=namespaceclasses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=namespaceclass.akuity.io,resources=namespaceclasses/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=namespaceclass.akuity.io,resources=namespaceclasses/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;create;update
+// +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -55,7 +66,6 @@ type NamespaceClassReconciler struct {
 func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = logf.FromContext(ctx)
 
-	// TODO(user): your logic here
 	namespace := &corev1.Namespace{}
 	if err := r.Get(ctx, req.NamespacedName, namespace); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -71,6 +81,11 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	var oldRefs []resourceRef
+	if data := namespace.Annotations[managedResourcesAnnotation]; data != "" {
+		_ = json.Unmarshal([]byte(data), &oldRefs)
+	}
+	var newRefs []resourceRef
 	for _, resource := range namespaceClass.Spec.Resources {
 		obj := &unstructured.Unstructured{}
 		if err := json.Unmarshal(resource.Raw, obj); err != nil {
@@ -107,15 +122,70 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 
+		gvk := obj.GroupVersionKind()
+		newRefs = append(newRefs, resourceRef{
+			Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind, Name: obj.GetName(),
+		})
 	}
 
-	return ctrl.Result{}, nil
+	newSet := map[resourceRef]bool{}
+	for _, ref := range newRefs {
+		newSet[ref] = true
+	}
+	for _, ref := range oldRefs {
+		if newSet[ref] {
+			continue
+		}
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(schema.GroupVersionKind{Group: ref.Group, Version: ref.Version, Kind: ref.Kind})
+		obj.SetName(ref.Name)
+		obj.SetNamespace(namespace.Name)
+		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	}
+
+	data, err := json.Marshal(newRefs)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if namespace.Annotations == nil {
+		namespace.Annotations = map[string]string{}
+	}
+	namespace.Annotations[managedResourcesAnnotation] = string(data)
+	return ctrl.Result{}, r.Update(ctx, namespace)
+}
+
+// make sure ns that are labeled with a specific NamespaceClass are reconciled when the NamespaceClass changes.
+func (r *NamespaceClassReconciler) namespacesForClass(
+	ctx context.Context, obj client.Object,
+) []reconcile.Request {
+	className := obj.GetName()
+
+	var nsList corev1.NamespaceList
+	if err := r.List(ctx, &nsList); err != nil {
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, ns := range nsList.Items {
+		if ns.Labels["namespaceclass.akuity.io/name"] == className {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: client.ObjectKey{Name: ns.Name},
+			})
+		}
+	}
+	return requests
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Namespace{}).
+		Watches(
+			&namespaceclassv1alpha1.NamespaceClass{},
+			handler.EnqueueRequestsFromMapFunc(r.namespacesForClass),
+		).
 		Named("namespaceclass").
 		Complete(r)
 }

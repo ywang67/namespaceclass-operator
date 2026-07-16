@@ -5,21 +5,17 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - ""
+  - '*'
   resources:
-  - namespaces
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - serviceaccounts
+  - '*'
   verbs:
   - create
+  - delete
   - get
+  - list
+  - patch
   - update
+  - watch
 - apiGroups:
   - namespaceclass.akuity.io
   resources:
