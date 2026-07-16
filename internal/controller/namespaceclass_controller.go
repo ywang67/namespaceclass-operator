@@ -95,11 +95,7 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 
-		// We only support namespaced resources. A NamespaceClass provisions
-		// per-namespace resources, so a cluster-scoped resource (ClusterRole,
-		// PersistentVolume, ...) does not belong here: it would be shared across
-		// every namespace of the class and deleting it on a class switch would
-		// break the others. Skip it with a warning instead of failing.
+		// We only support namespaced resources.
 		mapping, err := r.RESTMapper().RESTMapping(obj.GroupVersionKind().GroupKind(), obj.GroupVersionKind().Version)
 		if err != nil {
 			log.Error(err, "failed to resolve resource scope, skipping", "kind", obj.GetKind(), "name", obj.GetName())

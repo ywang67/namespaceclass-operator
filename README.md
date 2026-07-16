@@ -1,8 +1,127 @@
 # namespaceclass-operator
-// TODO(user): Add simple overview of use/purpose
+
+A Kubernetes operator that lets cluster admins define reusable **namespace classes**.
+A `NamespaceClass` is a cluster-scoped resource that declares a set of resources
+(NetworkPolicies, ConfigMaps, ResourceQuotas, ...) which should automatically exist
+in any namespace of that class. A namespace opts into a class via a label; the
+operator keeps the namespace's managed resources in sync with the class definition.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+Admins create `NamespaceClass` objects, each listing the resources a namespace of
+that class should have:
+
+```yaml
+apiVersion: namespaceclass.akuity.io/v1alpha1
+kind: NamespaceClass
+metadata:
+  name: public-network
+spec:
+  resources:
+    - apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-all
+      spec:
+        podSelector: {}
+        ingress:
+          - {}
+```
+
+A namespace joins a class with the label `namespaceclass.akuity.io/name: <class>`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: web-portal
+  labels:
+    namespaceclass.akuity.io/name: public-network
+```
+
+The controller then creates `allow-all` inside `web-portal`, and keeps it in sync
+as the namespace switches classes or the class definition changes.
+
+### Design
+
+- **Reconcile target is the Namespace, not the NamespaceClass.** The desired state
+  ("this namespace should contain exactly the class's resources") belongs to each
+  namespace, and one class maps to many namespaces. The controller uses
+  `For(&Namespace{})` plus `Watches(&NamespaceClass{})`: a class change is mapped to
+  all namespaces referencing it, so both triggers converge on "reconcile a namespace".
+- **Bookkeeping via an annotation ledger.** After reconciling, the controller records
+  the resources it created in the namespace annotation
+  `namespaceclass.akuity.io/managed-resources`. On the next reconcile it diffs the
+  ledger (what it created last time) against the current class (what it should create
+  now) and deletes the difference. This is how switching classes and shrinking a class
+  correctly delete stale resources — the current class alone doesn't reveal what used
+  to exist.
+- **Arbitrary resource kinds.** Resources are stored as `runtime.RawExtension` and
+  applied via an unstructured client, so any kind is supported. To grant the operator
+  permission for unknown kinds, its ClusterRole uses wildcard RBAC
+  (`groups=*, resources=*`). In production this should be narrowed to the kinds
+  actually used.
+- **Namespaced resources only.** A NamespaceClass provisions per-namespace resources,
+  so cluster-scoped resources (ClusterRole, PersistentVolume, ...) are intentionally
+  **skipped** with a warning: they would be shared across every namespace of the class,
+  and deleting one on a class switch would break the others. The controller detects
+  scope at runtime via the RESTMapper.
+
+## Local Verification
+
+The scenarios below were verified end-to-end on a local `kind` cluster. They map
+directly to the four requirements.
+
+```sh
+# 0. Cluster + CRDs + run the controller locally
+kind create cluster --name nsclass-test
+make install
+make run          # leave this running in its own terminal
+```
+
+The sample manifests live in `config/samples/`:
+`public-network-nsclass.yaml`, `internal-network-nsclass.yaml`, `web-portal-namespace.yaml`.
+
+**1. Create resources when a namespace joins a class**
+
+```sh
+kubectl apply -f config/samples/public-network-nsclass.yaml
+kubectl apply -f config/samples/internal-network-nsclass.yaml
+kubectl apply -f config/samples/web-portal-namespace.yaml
+
+kubectl get networkpolicy,configmap -n web-portal
+# => allow-all (NetworkPolicy) and public-config (ConfigMap) are created
+```
+
+**2. Switch classes (create new + delete old)**
+
+```sh
+kubectl label namespace web-portal namespaceclass.akuity.io/name=internal-network --overwrite
+
+kubectl get networkpolicy,configmap -n web-portal
+# => public-network's resources are deleted, internal-network's are created
+```
+
+**3. Update a class definition (existing namespaces sync)**
+
+Edit `internal-network-nsclass.yaml` to add another resource, then:
+
+```sh
+kubectl apply -f config/samples/internal-network-nsclass.yaml
+# without touching the namespace, the new resource appears in web-portal
+```
+
+**4. Cluster-scoped resources are skipped**
+
+Adding a `ClusterRole` to a class and applying it produces a controller log
+`skipping cluster-scoped resource ...`, and the ClusterRole is not created.
+
+Inspect the ledger at any point:
+
+```sh
+kubectl get ns web-portal \
+  -o jsonpath='{.metadata.annotations.namespaceclass\.akuity\.io/managed-resources}'
+```
 
 ## Getting Started
 
