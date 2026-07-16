@@ -13,6 +13,14 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
+  - get
+  - update
+- apiGroups:
   - namespaceclass.akuity.io
   resources:
   - namespaceclasses
