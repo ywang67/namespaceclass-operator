@@ -86,11 +86,23 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		labels["namespaceclass.akuity.io/managed-by"] = "namespaceclass-operator"
 		labels["namespaceclass.akuity.io/class"] = className
 		obj.SetLabels(labels)
-		if err := r.Create(ctx, obj); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				continue
-			}
+		existing := &unstructured.Unstructured{}
+		existing.SetGroupVersionKind(obj.GroupVersionKind())
 
+		err := r.Get(ctx, client.ObjectKeyFromObject(obj), existing)
+		if apierrors.IsNotFound(err) {
+			if err := r.Create(ctx, obj); err != nil {
+				return ctrl.Result{}, err
+			}
+			continue
+		}
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		// Update the existing resource with the new spec, preserving the resource version to avoid conflicts.
+		obj.SetResourceVersion(existing.GetResourceVersion())
+		if err := r.Update(ctx, obj); err != nil {
 			return ctrl.Result{}, err
 		}
 
