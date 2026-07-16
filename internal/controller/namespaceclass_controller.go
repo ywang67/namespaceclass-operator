@@ -64,7 +64,7 @@ type NamespaceClassReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
 func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
 
 	namespace := &corev1.Namespace{}
 	if err := r.Get(ctx, req.NamespacedName, namespace); err != nil {
@@ -75,6 +75,8 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if !ok || className == "" {
 		return ctrl.Result{}, nil
 	}
+
+	log.Info("reconciling namespace", "namespace", namespace.Name, "class", className)
 
 	namespaceClass := &namespaceclassv1alpha1.NamespaceClass{}
 	if err := r.Get(ctx, client.ObjectKey{Name: className}, namespaceClass); err != nil {
@@ -141,8 +143,10 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		obj.SetName(ref.Name)
 		obj.SetNamespace(namespace.Name)
 		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+			log.Error(err, "failed to delete stale resource", "namespace", namespace.Name, "kind", ref.Kind, "name", ref.Name)
 			return ctrl.Result{}, err
 		}
+		log.Info("deleted stale resource", "namespace", namespace.Name, "kind", ref.Kind, "name", ref.Name)
 	}
 
 	data, err := json.Marshal(newRefs)
@@ -153,7 +157,12 @@ func (r *NamespaceClassReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		namespace.Annotations = map[string]string{}
 	}
 	namespace.Annotations[managedResourcesAnnotation] = string(data)
-	return ctrl.Result{}, r.Update(ctx, namespace)
+	if err := r.Update(ctx, namespace); err != nil {
+		log.Error(err, "failed to update ledger annotation", "namespace", namespace.Name)
+		return ctrl.Result{}, err
+	}
+	log.Info("reconcile complete", "namespace", namespace.Name, "class", className, "ledger", string(data))
+	return ctrl.Result{}, nil
 }
 
 // make sure ns that are labeled with a specific NamespaceClass are reconciled when the NamespaceClass changes.
